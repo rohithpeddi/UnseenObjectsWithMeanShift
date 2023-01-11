@@ -32,6 +32,16 @@ from fcn.test_demo import get_predictor, get_predictor_crop
 import os
 
 dirname = os.path.dirname(__file__)
+
+def add_path(path):
+    if path not in sys.path:
+        sys.path.insert(0, path)
+
+# Add lib to PYTHONPATH
+lib_path = osp.join(dirname, '..', 'lib')
+add_path(lib_path)
+
+
 def parse_args():
     """
     Parse input arguments
