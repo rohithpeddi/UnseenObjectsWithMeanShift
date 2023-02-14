@@ -346,82 +346,163 @@ def test_sample_crop_nolabel(cfg, sample, predictor, predictor_crop, visualizati
                                                   low_threshold=low_threshold)
     binary_mask, score_mask, bbox = combine_masks_with_NMS(confident_instances)
 
-    from detectron2.utils.visualizer import Visualizer, GenericMask, ColorMode
+    from detectron2.utils.visualizer import Visualizer, GenericMask, ColorMode, _create_text_labels
+    from detectron2.utils.colormap import random_color
+    from collections import Counter
+    import matplotlib.colors as mplc
+    import matplotlib as mpl
+    import numpy as np
 
-    # MetadataCatalog.get(cfg.DATASETS.TRAIN[0]).thing_classes = clss
-    # MetadataCatalog.get(cfg.DATASETS.TRAIN[0]).thing_colors = [(255, 255, 0), (0, 0, 255), (0, 255, 0), (255, 0, 255),
-    #                                                            (156, 225, 242)]
-    #
-    # class MyVisualizer(Visualizer):
-    #     def _jitter(self, color):
-    #         return color
-    #
-    # v = Visualizer(im[:, :, ::-1], MetadataCatalog.get(cfg.DATASETS.TRAIN[0]), scale=1.2,
-    #                instance_mode=ColorMode.SEGMENTATION)
-    # v = v.draw_instance_predictions(outputs["instances"].to("cpu"))
-    # img = cv2.resize(v.get_image()[:, :, ::-1], (1220, 780))
+    from sklearn.utils import shuffle
+    from sklearn.cluster import KMeans
 
-    # class MyVisualizer(Visualizer):
-    #
-    #     def draw_instance_predictions(self, predictions):
-    #         """
-    #         Draw instance-level prediction results on an image.
-    #
-    #         Args:
-    #             predictions (Instances): the output of an instance detection/segmentation
-    #                 model. Following fields will be used to draw:
-    #                 "pred_boxes", "pred_classes", "scores", "pred_masks" (or "pred_masks_rle").
-    #
-    #         Returns:
-    #             output (VisImage): image object with visualizations.
-    #         """
-    #         boxes = predictions.pred_boxes if predictions.has("pred_boxes") else None
-    #         scores = predictions.scores if predictions.has("scores") else None
-    #         classes = predictions.pred_classes.tolist() if predictions.has("pred_classes") else None
-    #         labels = _create_text_labels(classes, scores, self.metadata.get("thing_classes", None))
-    #         keypoints = predictions.pred_keypoints if predictions.has("pred_keypoints") else None
-    #
-    #         if predictions.has("pred_masks"):
-    #             masks = np.asarray(predictions.pred_masks)
-    #             masks = [GenericMask(x, self.output.height, self.output.width) for x in masks]
-    #         else:
-    #             masks = None
-    #
-    #         if self._instance_mode == ColorMode.SEGMENTATION and self.metadata.get("thing_colors"):
-    #             colors = [
-    #                 [x / 255 for x in self.metadata.thing_colors[c]] for c in classes
-    #             ]
-    #             alpha = 0.8
-    #         else:
-    #             colors = None
-    #             alpha = 0.5
-    #
-    #         if self._instance_mode == ColorMode.IMAGE_BW:
-    #             self.output.reset_image(
-    #                 self._create_grayscale_image(
-    #                     (predictions.pred_masks.any(dim=0) > 0).numpy()
-    #                     if predictions.has("pred_masks")
-    #                     else None
-    #                 )
-    #             )
-    #             alpha = 0.3
-    #
-    #         self.overlay_instances(
-    #             masks=masks,
-    #             boxes=boxes,
-    #             labels=labels,
-    #             keypoints=keypoints,
-    #             assigned_colors=colors,
-    #             alpha=alpha,
-    #         )
-    #         return self.output
+    class MyVisualizer(Visualizer):
+
+        def draw_instance_predictions(self, predictions):
+            boxes = predictions.pred_boxes if predictions.has("pred_boxes") else None
+            scores = predictions.scores if predictions.has("scores") else None
+            classes = predictions.pred_classes.tolist() if predictions.has("pred_classes") else None
+            labels = _create_text_labels(classes, scores, self.metadata.get("thing_classes", None))
+            keypoints = predictions.pred_keypoints if predictions.has("pred_keypoints") else None
+
+            if predictions.has("pred_masks"):
+                masks = np.asarray(predictions.pred_masks)
+                masks = [GenericMask(x, self.output.height, self.output.width) for x in masks]
+            else:
+                masks = None
+
+            if self._instance_mode == ColorMode.SEGMENTATION and self.metadata.get("thing_colors"):
+                colors = [
+                    [x / 255 for x in self.metadata.thing_colors[c]] for c in classes
+                ]
+                alpha = 0.8
+            else:
+                colors = None
+                alpha = 0.9
+
+            self.overlay_instances(
+                masks=masks,
+                boxes=boxes,
+                labels=labels,
+                keypoints=keypoints,
+                assigned_colors=colors,
+                alpha=alpha,
+            )
+            return self.output
+
+        def overlay_instances(
+                self,
+                *,
+                boxes=None,
+                labels=None,
+                masks=None,
+                keypoints=None,
+                assigned_colors=None,
+                alpha=0.5,
+        ):
+            num_instances = 0
+            if boxes is not None:
+                boxes = self._convert_boxes(boxes)
+                num_instances = len(boxes)
+            if masks is not None:
+                masks = self._convert_masks(masks)
+                if num_instances:
+                    assert len(masks) == num_instances
+                else:
+                    num_instances = len(masks)
+            if keypoints is not None:
+                if num_instances:
+                    assert len(keypoints) == num_instances
+                else:
+                    num_instances = len(keypoints)
+                keypoints = self._convert_keypoints(keypoints)
+            if labels is not None:
+                assert len(labels) == num_instances
+            if assigned_colors is None:
+                assigned_colors = [random_color(rgb=True, maximum=1) for _ in range(num_instances)]
+            if num_instances == 0:
+                return self.output
+            if boxes is not None and boxes.shape[1] == 5:
+                return self.overlay_rotated_instances(
+                    boxes=boxes, labels=labels, assigned_colors=assigned_colors
+                )
+
+            # Display in largest to smallest order to reduce occlusion.
+            areas = None
+            if boxes is not None:
+                areas = np.prod(boxes[:, 2:] - boxes[:, :2], axis=1)
+            elif masks is not None:
+                areas = np.asarray([x.area() for x in masks])
+
+            if areas is not None:
+                sorted_idxs = np.argsort(-areas).tolist()
+                masks = [masks[idx] for idx in sorted_idxs] if masks is not None else None
+                assigned_colors = [assigned_colors[idx] for idx in sorted_idxs]
+                keypoints = keypoints[sorted_idxs] if keypoints is not None else None
+
+            for i in range(num_instances):
+                color = assigned_colors[i]
+                if masks is not None:
+                    for segment in masks[i].polygons:
+                        self.draw_polygon(segment.reshape(-1, 2), color, alpha=alpha)
+
+            return self.output
+
+        def draw_polygon(self, segment, color, edge_color=None, alpha=0.5):
+            color = mplc.to_rgb(color) + (1,)
+            polygon = mpl.patches.Polygon(
+                segment,
+                fill=True,
+                facecolor=color,
+                edgecolor=color,
+                linewidth=max(self._default_font_size // 15 * self.output.scale, 1),
+            )
+            self.output.ax.add_patch(polygon)
+            return self.output
 
     if visualization:
         im = cv2.imread(sample["file_name"])  # this is for visualization
         im = np.zeros_like(im)
-        v = Visualizer(im[:, :, ::-1], MetadataCatalog.get(cfg.DATASETS.TRAIN[0]), scale=1.2, instance_mode=ColorMode.SEGMENTATION)
+        v = MyVisualizer(im[:, :, ::-1], MetadataCatalog.get(cfg.DATASETS.TRAIN[0]), scale=1.0, instance_mode=ColorMode.SEGMENTATION)
         out = v.draw_instance_predictions(confident_instances.to("cpu"))
         visual_result = out.get_image()[:, :, ::-1]
+
+        masked_image = np.copy(visual_result)
+
+        w, h, d = masked_image.shape
+        image_data = np.reshape(masked_image, (w * h, d))
+
+        color_dict = {}
+        for i in range(w*h):
+            if str(image_data[i]) in color_dict:
+                color_dict[str(image_data[i])] += color_dict[str(image_data[i])] + 1
+            else:
+                color_dict[str(image_data[i])] = 1
+
+        import heapq
+        from operator import itemgetter
+
+        top_colors =  sorted(color_dict, key=color_dict.get, reverse=True)[:8]
+
+        for i in range(w*h):
+            if str(image_data[i]) not in top_colors:
+                image_data[i] = np.array([0, 0, 0])
+
+        visual_result = image_data.reshape((w, h, -1))
+
+        # SEED = 0
+        # train_data = shuffle(image_data, random_state=SEED, n_samples=100)
+        # print(train_data.shape)
+        # kmeans = KMeans(n_clusters=8, random_state=SEED)
+        # kmeans = kmeans.fit(train_data)
+        #
+        # pred = kmeans.predict(image_data)
+        # final_image = kmeans.cluster_centers_[pred].reshape(w, h, -1)
+        #
+        # visual_result = final_image
+
+
+
         cv2.imwrite(sample["file_name"][-6:-3]+"pred.png", visual_result)
         # cv2.imshow("image", visual_result)
         # cv2.waitKey(0)
