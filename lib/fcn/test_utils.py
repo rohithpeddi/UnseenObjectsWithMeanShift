@@ -3,7 +3,6 @@ import os
 
 from fcn.test_dataset import filter_labels_depth, crop_rois, clustering_features, match_label_crop
 
-
 sys.path.append(os.path.dirname(__file__))
 sys.path.append(os.path.join(os.path.dirname(__file__), '..'))
 sys.path.append(os.path.join(os.path.dirname(__file__), '..', '..'))
@@ -21,6 +20,7 @@ from detectron2.engine import DefaultPredictor
 
 # ignore some warnings
 import warnings
+
 warnings.simplefilter("ignore", UserWarning)
 import numpy as np
 import cv2 as cv
@@ -44,9 +44,11 @@ def get_confident_instances(outputs, topk=False, score=0.7, num_class=2, low_thr
             return confident_instances
         else:
             return instances
-    confident_instances = instances[instances.scores > score]
+    score = torch.tensor(score).to(instances.scores.device)
+    filtered_indices = (instances.scores > score).cpu()
+    confident_instances = instances[filtered_indices]
     return confident_instances
-    
+
 
 def combine_masks_with_NMS(instances):
     """
@@ -56,35 +58,36 @@ def combine_masks_with_NMS(instances):
     """
     mask = instances.get('pred_masks').to('cpu').numpy()
     scores = instances.get('scores').to('cpu').numpy()
-
+    
     # non-maximum suppression
     keep = nms(mask, scores, thresh=0.7).astype(int)
     mask = mask[keep]
     scores = scores[keep]
-
+    
     num, h, w = mask.shape
     bin_mask = np.zeros((h, w))
     score_mask = np.zeros((h, w))
     num_instance = len(mask)
     bbox = np.zeros((num_instance, 5), dtype=np.float32)
-
+    
     # if there is not any instance, just return a mask full of 0s.
     if num_instance == 0:
         return bin_mask, score_mask, bbox
-
+    
     for m, object_label in zip(mask, range(2, 2 + num_instance)):
         label_pos = np.nonzero(m)
         bin_mask[label_pos] = object_label
         score_mask[label_pos] = int(scores[object_label - 2] * 100)
-
+        
         # bounding box
         y1 = np.min(label_pos[0])
         y2 = np.max(label_pos[0])
         x1 = np.min(label_pos[1])
         x2 = np.max(label_pos[1])
         bbox[object_label - 2, :] = [x1, y1, x2, y2, scores[object_label - 2]]
-
+    
     return bin_mask, score_mask, bbox
+
 
 def combine_masks(instances):
     """
@@ -99,16 +102,17 @@ def combine_masks(instances):
     # if there is not any instance, just return a mask full of 0s.
     if num_instance == 0:
         return bin_mask
-
-    for m, object_label in zip(mask, range(2, 2+num_instance)):
+    
+    for m, object_label in zip(mask, range(2, 2 + num_instance)):
         label_pos = np.nonzero(m)
         bin_mask[label_pos] = object_label
     # filename = './bin_masks/001.png'
     # cv2.imwrite(filename, bin_mask)
     return bin_mask
 
-class Predictor_RGBD(DefaultPredictor):
 
+class Predictor_RGBD(DefaultPredictor):
+    
     def __call__(self, sample):
         """
         Args:
@@ -130,21 +134,22 @@ class Predictor_RGBD(DefaultPredictor):
             transforms = self.aug.get_transform(original_image)
             image = transforms.apply_image(original_image)
             image = torch.as_tensor(image.astype("float32").transpose(2, 0, 1))
-            #image = torch.as_tensor(original_image.astype("float32").transpose(2, 0, 1))
+            # image = torch.as_tensor(original_image.astype("float32").transpose(2, 0, 1))
             inputs = {"image": image, "height": height, "width": width}
-
+            
             if self.cfg.INPUT.INPUT_IMAGE == "DEPTH" or "RGBD" in self.cfg.INPUT.INPUT_IMAGE:
                 depth_image = sample["raw_depth"]
                 depth_image = transforms.apply_image(depth_image)
                 depth_image = torch.as_tensor(depth_image.astype("float32").transpose(2, 0, 1))
                 depth = depth_image
                 inputs["depth"] = depth
-
+            
             predictions = self.model([inputs])[0]
             return predictions
 
-class Network_RGBD(DefaultPredictor):
 
+class Network_RGBD(DefaultPredictor):
+    
     def __call__(self, sample):
         """
         Args:
@@ -160,16 +165,16 @@ class Network_RGBD(DefaultPredictor):
             # Apply pre-processing to image.
             predictions = self.model([sample])[0]
             return predictions
-            
-            
-def test_sample(cfg, sample, predictor, visualization = False, topk=False, confident_score=0.9, low_threshold=0.4):
+
+
+def test_sample(cfg, sample, predictor, visualization=False, topk=False, confident_score=0.9, low_threshold=0.4):
     im = cv2.imread(sample["file_name"])
     print(sample["file_name"])
     if "label" in sample.keys():
         gt = sample["label"].squeeze().numpy()
     else:
         gt = sample["labels"].squeeze().numpy()
-
+    
     image = sample['image_color'].cuda()
     sample["image"] = image
     sample["height"] = image.shape[-2]  # image: 3XHXW, tensor
@@ -198,13 +203,14 @@ def test_sample(cfg, sample, predictor, visualization = False, topk=False, confi
     return metrics
 
 
-def get_result_from_network(cfg, image, depth, label, predictor, topk=False, confident_score=0.7, low_threshold=0.4, vis_crop=False):
+def get_result_from_network(cfg, image, depth, label, predictor, topk=False, confident_score=0.7, low_threshold=0.4,
+                            vis_crop=False):
     height = image.shape[-2]  # image: 3XHXW, tensor
     width = image.shape[-1]
     image = torch.squeeze(image, dim=0)
     if depth is not None:
         depth = torch.squeeze(depth, dim=0)
-
+    
     sample = {"image": image, "height": height, "width": width, "depth": depth}
     outputs = predictor(sample)
     confident_instances = get_confident_instances(outputs, topk=topk, score=confident_score,
@@ -221,7 +227,7 @@ def get_result_from_network(cfg, image, depth, label, predictor, topk=False, con
         plt.imshow(depth)
         plt.axis('off')
         plt.show()
-
+        
         v = Visualizer(im[:, :, ::-1], MetadataCatalog.get(cfg.DATASETS.TRAIN[0]), scale=1.0)
         out = v.draw_instance_predictions(confident_instances.to("cpu"))
         visual_result = out.get_image()[:, :, ::-1]
@@ -232,25 +238,26 @@ def get_result_from_network(cfg, image, depth, label, predictor, topk=False, con
     return binary_mask
 
 
-def test_sample_crop(cfg, sample, predictor, predictor_crop, visualization = False, topk=False, confident_score=0.7, low_threshold=0.4, print_result=False):
+def test_sample_crop(cfg, sample, predictor, predictor_crop, visualization=False, topk=False, confident_score=0.7,
+                     low_threshold=0.4, print_result=False):
     # First network: the image needs the original one.
-    image = sample['image_color'].cuda() # for future crop
+    image = sample['image_color'].cuda()  # for future crop
     sample["image"] = image
-    sample["height"] = image.shape[-2] # image: 3XHXW, tensor
+    sample["height"] = image.shape[-2]  # image: 3XHXW, tensor
     sample["width"] = image.shape[-1]
     gt = None
     if "label" in sample.keys():
         gt = sample["label"].squeeze().numpy()
     elif "label" in sample.keys():
         gt = sample["labels"].squeeze().numpy()
-
+    
     if gt is not None:
         label = torch.from_numpy(gt).unsqueeze(dim=0).cuda()
     if cfg.MODEL.USE_DEPTH:
         depth = sample['depth'].cuda()
     else:
         depth = None
-
+    
     outputs = predictor(sample)
     confident_instances = get_confident_instances(outputs, topk=topk, score=confident_score,
                                                   num_class=cfg.MODEL.SEM_SEG_HEAD.NUM_CLASSES,
@@ -260,7 +267,7 @@ def test_sample_crop(cfg, sample, predictor, predictor_crop, visualization = Fal
     if print_result:
         print("file name: ", sample["file_name"])
         print("first:", metrics)
-
+    
     if visualization:
         im = cv2.imread(sample["file_name"])  # this is for visualization
         v = Visualizer(im[:, :, ::-1], MetadataCatalog.get(cfg.DATASETS.TRAIN[0]), scale=1.2)
@@ -270,12 +277,12 @@ def test_sample_crop(cfg, sample, predictor, predictor_crop, visualization = Fal
         cv2.imshow("image", visual_result)
         cv2.waitKey(0)
         cv2.destroyAllWindows()
-
+    
     out_label = torch.as_tensor(binary_mask).unsqueeze(dim=0).cuda()
     if depth is not None:
         if len(depth.shape) == 3:
             depth = torch.unsqueeze(depth, dim=0)
-
+    
     if len(image.shape) == 3:
         image = torch.unsqueeze(image, dim=0)
     if depth is not None:
@@ -284,13 +291,13 @@ def test_sample_crop(cfg, sample, predictor, predictor_crop, visualization = Fal
             out_label = filter_labels_depth(out_label, depth, 0.8)
         else:
             out_label = filter_labels_depth(out_label, depth, 0.5)
-
+    
     # zoom in refinement
     out_label_refined = None
     if predictor_crop is not None:
         rgb_crop, out_label_crop, rois, depth_crop = crop_rois(image, out_label.clone(), depth)
         if rgb_crop.shape[0] > 0:
-            labels_crop = torch.zeros((rgb_crop.shape[0], rgb_crop.shape[-2], rgb_crop.shape[-1]))#.cuda()
+            labels_crop = torch.zeros((rgb_crop.shape[0], rgb_crop.shape[-2], rgb_crop.shape[-1]))  # .cuda()
             for i in range(rgb_crop.shape[0]):
                 if depth_crop is None:
                     binary_mask_crop = get_result_from_network(cfg, rgb_crop[i], None, out_label_crop[i],
@@ -298,16 +305,19 @@ def test_sample_crop(cfg, sample, predictor, predictor_crop, visualization = Fal
                                                                topk=topk, confident_score=confident_score,
                                                                low_threshold=low_threshold)
                 else:
-                    binary_mask_crop = get_result_from_network(cfg, rgb_crop[i], depth_crop[i], out_label_crop[i], predictor_crop,
-                                                       topk=topk, confident_score=confident_score, low_threshold=low_threshold)
+                    binary_mask_crop = get_result_from_network(cfg, rgb_crop[i], depth_crop[i], out_label_crop[i],
+                                                               predictor_crop,
+                                                               topk=topk, confident_score=confident_score,
+                                                               low_threshold=low_threshold)
                 labels_crop[i] = torch.from_numpy(binary_mask_crop)
-            out_label_refined, labels_crop = match_label_crop(out_label, labels_crop.cuda(), out_label_crop, rois, depth_crop)
-
+            out_label_refined, labels_crop = match_label_crop(out_label, labels_crop.cuda(), out_label_crop, rois,
+                                                              depth_crop)
+        
         if visualization and rgb_crop.shape[0] > 0:
             bbox = None
             _vis_minibatch_segmentation_final(image, depth, label, out_label, out_label_refined, None,
-                selected_pixels=None, bbox=bbox)
-
+                                              selected_pixels=None, bbox=bbox)
+    
     if out_label_refined is not None:
         out_label_refined = out_label_refined.squeeze(dim=0).cpu().numpy()
     prediction = out_label.squeeze().detach().cpu().numpy()
@@ -319,19 +329,20 @@ def test_sample_crop(cfg, sample, predictor, predictor_crop, visualization = Fal
     if print_result:
         print("refined: ", metrics_refined)
         print("========")
-
+    
     return metrics, metrics_refined
 
 
-def test_sample_crop_nolabel(cfg, sample, predictor, predictor_crop, visualization = False, topk=False, confident_score=0.7, low_threshold=0.4, print_result=False):
-    image = sample['image_color'].cuda() # for future crop
+def test_sample_crop_nolabel(cfg, sample, predictor, predictor_crop, visualization=False, topk=False,
+                             confident_score=0.7, low_threshold=0.4, print_result=False):
+    image = sample['image_color'].cuda()  # for future crop
     sample["image"] = image
     if len(image.shape) == 4:
         image = torch.squeeze(image, dim=0)
         print("image shape: ", image.shape)
-    sample["height"] = image.shape[-2] # image: 3XHXW, tensor
+    sample["height"] = image.shape[-2]  # image: 3XHXW, tensor
     sample["width"] = image.shape[-1]
-
+    
     if cfg.MODEL.USE_DEPTH:
         depth = sample['depth'].cuda()
         if len(depth.shape) == 4:
@@ -339,96 +350,186 @@ def test_sample_crop_nolabel(cfg, sample, predictor, predictor_crop, visualizati
     else:
         depth = None
         sample['depth'] = None
-
+    
     outputs = predictor(sample)
     confident_instances = get_confident_instances(outputs, topk=topk, score=confident_score,
                                                   num_class=cfg.MODEL.SEM_SEG_HEAD.NUM_CLASSES,
                                                   low_threshold=low_threshold)
     binary_mask, score_mask, bbox = combine_masks_with_NMS(confident_instances)
+    
+    from detectron2.utils.visualizer import Visualizer, GenericMask, ColorMode, _create_text_labels
+    from detectron2.utils.colormap import random_color
+    from collections import Counter
+    import matplotlib.colors as mplc
+    import matplotlib as mpl
+    import numpy as np
 
-    from detectron2.utils.visualizer import Visualizer, GenericMask, ColorMode
-
-    # MetadataCatalog.get(cfg.DATASETS.TRAIN[0]).thing_classes = clss
-    # MetadataCatalog.get(cfg.DATASETS.TRAIN[0]).thing_colors = [(255, 255, 0), (0, 0, 255), (0, 255, 0), (255, 0, 255),
-    #                                                            (156, 225, 242)]
-    #
-    # class MyVisualizer(Visualizer):
-    #     def _jitter(self, color):
-    #         return color
-    #
-    # v = Visualizer(im[:, :, ::-1], MetadataCatalog.get(cfg.DATASETS.TRAIN[0]), scale=1.2,
-    #                instance_mode=ColorMode.SEGMENTATION)
-    # v = v.draw_instance_predictions(outputs["instances"].to("cpu"))
-    # img = cv2.resize(v.get_image()[:, :, ::-1], (1220, 780))
-
-    # class MyVisualizer(Visualizer):
-    #
-    #     def draw_instance_predictions(self, predictions):
-    #         """
-    #         Draw instance-level prediction results on an image.
-    #
-    #         Args:
-    #             predictions (Instances): the output of an instance detection/segmentation
-    #                 model. Following fields will be used to draw:
-    #                 "pred_boxes", "pred_classes", "scores", "pred_masks" (or "pred_masks_rle").
-    #
-    #         Returns:
-    #             output (VisImage): image object with visualizations.
-    #         """
-    #         boxes = predictions.pred_boxes if predictions.has("pred_boxes") else None
-    #         scores = predictions.scores if predictions.has("scores") else None
-    #         classes = predictions.pred_classes.tolist() if predictions.has("pred_classes") else None
-    #         labels = _create_text_labels(classes, scores, self.metadata.get("thing_classes", None))
-    #         keypoints = predictions.pred_keypoints if predictions.has("pred_keypoints") else None
-    #
-    #         if predictions.has("pred_masks"):
-    #             masks = np.asarray(predictions.pred_masks)
-    #             masks = [GenericMask(x, self.output.height, self.output.width) for x in masks]
-    #         else:
-    #             masks = None
-    #
-    #         if self._instance_mode == ColorMode.SEGMENTATION and self.metadata.get("thing_colors"):
-    #             colors = [
-    #                 [x / 255 for x in self.metadata.thing_colors[c]] for c in classes
-    #             ]
-    #             alpha = 0.8
-    #         else:
-    #             colors = None
-    #             alpha = 0.5
-    #
-    #         if self._instance_mode == ColorMode.IMAGE_BW:
-    #             self.output.reset_image(
-    #                 self._create_grayscale_image(
-    #                     (predictions.pred_masks.any(dim=0) > 0).numpy()
-    #                     if predictions.has("pred_masks")
-    #                     else None
-    #                 )
-    #             )
-    #             alpha = 0.3
-    #
-    #         self.overlay_instances(
-    #             masks=masks,
-    #             boxes=boxes,
-    #             labels=labels,
-    #             keypoints=keypoints,
-    #             assigned_colors=colors,
-    #             alpha=alpha,
-    #         )
-    #         return self.output
-
+    
+    class MyVisualizer(Visualizer):
+        
+        def draw_instance_predictions(self, predictions):
+            boxes = predictions.pred_boxes if predictions.has("pred_boxes") else None
+            scores = predictions.scores if predictions.has("scores") else None
+            classes = predictions.pred_classes.tolist() if predictions.has("pred_classes") else None
+            labels = _create_text_labels(classes, scores, self.metadata.get("thing_classes", None))
+            keypoints = predictions.pred_keypoints if predictions.has("pred_keypoints") else None
+            
+            if predictions.has("pred_masks"):
+                masks = np.asarray(predictions.pred_masks)
+                masks = [GenericMask(x, self.output.height, self.output.width) for x in masks]
+            else:
+                masks = None
+            
+            if self._instance_mode == ColorMode.SEGMENTATION and self.metadata.get("thing_colors"):
+                colors = [
+                    [x / 255 for x in self.metadata.thing_colors[c]] for c in classes
+                ]
+                alpha = 0.8
+            else:
+                colors = None
+                alpha = 0.9
+            
+            self.overlay_instances(
+                masks=masks,
+                boxes=boxes,
+                labels=labels,
+                keypoints=keypoints,
+                assigned_colors=colors,
+                alpha=alpha,
+            )
+            return self.output
+        
+        def overlay_instances(
+                self,
+                *,
+                boxes=None,
+                labels=None,
+                masks=None,
+                keypoints=None,
+                assigned_colors=None,
+                alpha=0.5,
+        ):
+            num_instances = 0
+            if boxes is not None:
+                boxes = self._convert_boxes(boxes)
+                num_instances = len(boxes)
+            if masks is not None:
+                masks = self._convert_masks(masks)
+                if num_instances:
+                    assert len(masks) == num_instances
+                else:
+                    num_instances = len(masks)
+            if keypoints is not None:
+                if num_instances:
+                    assert len(keypoints) == num_instances
+                else:
+                    num_instances = len(keypoints)
+                keypoints = self._convert_keypoints(keypoints)
+            if labels is not None:
+                assert len(labels) == num_instances
+            if assigned_colors is None:
+                assigned_colors = [random_color(rgb=True, maximum=1) for _ in range(num_instances)]
+            if num_instances == 0:
+                return self.output
+            if boxes is not None and boxes.shape[1] == 5:
+                return self.overlay_rotated_instances(
+                    boxes=boxes, labels=labels, assigned_colors=assigned_colors
+                )
+            
+            # Display in largest to smallest order to reduce occlusion.
+            areas = None
+            if boxes is not None:
+                areas = np.prod(boxes[:, 2:] - boxes[:, :2], axis=1)
+            elif masks is not None:
+                areas = np.asarray([x.area() for x in masks])
+            
+            if areas is not None:
+                sorted_idxs = np.argsort(-areas).tolist()
+                masks = [masks[idx] for idx in sorted_idxs] if masks is not None else None
+                assigned_colors = [assigned_colors[idx] for idx in sorted_idxs]
+                keypoints = keypoints[sorted_idxs] if keypoints is not None else None
+            
+            for i in range(num_instances):
+                color = assigned_colors[i]
+                if masks is not None:
+                    for segment in masks[i].polygons:
+                        self.draw_polygon(segment.reshape(-1, 2), color, alpha=alpha)
+            
+            return self.output
+        
+        def draw_polygon(self, segment, color, edge_color=None, alpha=0.5):
+            color = mplc.to_rgb(color) + (1,)
+            polygon = mpl.patches.Polygon(
+                segment,
+                fill=True,
+                facecolor=color,
+                edgecolor=color,
+                linewidth=max(self._default_font_size // 15 * self.output.scale, 1),
+            )
+            self.output.ax.add_patch(polygon)
+            return self.output
+    
     if visualization:
         im = cv2.imread(sample["file_name"])  # this is for visualization
         im = np.zeros_like(im)
-        v = Visualizer(im[:, :, ::-1], MetadataCatalog.get(cfg.DATASETS.TRAIN[0]), scale=1.2, instance_mode=ColorMode.SEGMENTATION)
+        v = MyVisualizer(im[:, :, ::-1], MetadataCatalog.get(cfg.DATASETS.TRAIN[0]), scale=1.0,
+                         instance_mode=ColorMode.SEGMENTATION)
         out = v.draw_instance_predictions(confident_instances.to("cpu"))
         visual_result = out.get_image()[:, :, ::-1]
-        cv2.imwrite(sample["file_name"][-6:-3]+"pred.png", visual_result)
+        cv2.imwrite(sample["file_name"][-6:-3] + "pred_original.png", visual_result)
+        
+        masked_image = np.copy(visual_result)
+        
+        w, h, d = masked_image.shape
+        image_data = np.reshape(masked_image, (w * h, d))
+        
+        color_dict = {}
+        for i in range(w * h):
+            if str(image_data[i]) in color_dict:
+                color_dict[str(image_data[i])] += color_dict[str(image_data[i])] + 1
+            else:
+                color_dict[str(image_data[i])] = 1
+        
+        import heapq
+        from operator import itemgetter
+        
+        top_colors = sorted(color_dict, key=color_dict.get, reverse=True)[:9]
+        color_map = {color: number for number, color in enumerate(top_colors, start=1)}
+        
+        for i in range(w * h):
+            if str(image_data[i]) not in top_colors:
+                image_data[i] = np.array([0, 0, 0])
+                
+        color_map["[0 0 0]"] = 0
+                
+        image_png_data = np.zeros((w * h))
+        for i in range(w * h):
+            image_png_data[i] = color_map[str(image_data[i])]
+            
+        image_png_data = np.reshape(image_png_data, (w, h))
+        
+        #visual_result = image_png_data
+        
+        visual_result = image_data.reshape((w, h, -1))
+        
+        # SEED = 0
+        # train_data = shuffle(image_data, random_state=SEED, n_samples=100)
+        # print(train_data.shape)
+        # kmeans = KMeans(n_clusters=8, random_state=SEED)
+        # kmeans = kmeans.fit(train_data)
+        #
+        # pred = kmeans.predict(image_data)
+        # final_image = kmeans.cluster_centers_[pred].reshape(w, h, -1)
+        #
+        # visual_result = final_image
+        
+        cv2.imwrite(sample["file_name"][-6:-3] + "pred.png", visual_result)
         # cv2.imshow("image", visual_result)
         # cv2.waitKey(0)
         # cv2.destroyAllWindows()
-
+    
     out_label = torch.as_tensor(binary_mask).unsqueeze(dim=0).cuda()
-    out_score = torch.as_tensor(score_mask).unsqueeze(dim=0).cuda()    
+    out_score = torch.as_tensor(score_mask).unsqueeze(dim=0).cuda()
     if depth is not None:
         if len(depth.shape) == 3:
             depth = torch.unsqueeze(depth, dim=0)
@@ -440,30 +541,33 @@ def test_sample_crop_nolabel(cfg, sample, predictor, predictor_crop, visualizati
             out_label = filter_labels_depth(out_label, depth, 0.8)
         else:
             out_label = filter_labels_depth(out_label, depth, 0.5)
-
+    
     # zoom in refinement
     out_label_refined = None
     if predictor_crop is not None:
         rgb_crop, out_label_crop, rois, depth_crop = crop_rois(image, out_label.clone(), depth)
         if rgb_crop.shape[0] > 0:
-            labels_crop = torch.zeros((rgb_crop.shape[0], rgb_crop.shape[-2], rgb_crop.shape[-1]))#.cuda()
+            labels_crop = torch.zeros((rgb_crop.shape[0], rgb_crop.shape[-2], rgb_crop.shape[-1]))  # .cuda()
             for i in range(rgb_crop.shape[0]):
                 if depth is not None:
-                    binary_mask_crop = get_result_from_network(cfg, rgb_crop[i], depth_crop[i], out_label_crop[i], predictor_crop,
-                                                           topk=topk, confident_score=confident_score, low_threshold=low_threshold)
+                    binary_mask_crop = get_result_from_network(cfg, rgb_crop[i], depth_crop[i], out_label_crop[i],
+                                                               predictor_crop,
+                                                               topk=topk, confident_score=confident_score,
+                                                               low_threshold=low_threshold)
                 else:
                     binary_mask_crop = get_result_from_network(cfg, rgb_crop[i], None, out_label_crop[i],
                                                                predictor_crop,
                                                                topk=topk, confident_score=confident_score,
                                                                low_threshold=low_threshold)
                 labels_crop[i] = torch.from_numpy(binary_mask_crop)
-            out_label_refined, labels_crop = match_label_crop(out_label, labels_crop.cuda(), out_label_crop, rois, depth_crop)
-
+            out_label_refined, labels_crop = match_label_crop(out_label, labels_crop.cuda(), out_label_crop, rois,
+                                                              depth_crop)
+    
     if visualization:
         bbox = None
         _vis_minibatch_segmentation_final(image, depth, None, out_label, out_label_refined, None,
-            selected_pixels=None, bbox=bbox)
-
+                                          selected_pixels=None, bbox=bbox)
+    
     if out_label_refined is not None:
         out_label_refined = out_label_refined.squeeze(dim=0).cpu().numpy()
     prediction = out_label.squeeze().detach().cpu().numpy()
@@ -471,24 +575,24 @@ def test_sample_crop_nolabel(cfg, sample, predictor, predictor_crop, visualizati
         prediction_refined = out_label_refined
     else:
         prediction_refined = prediction.copy()
-        
-    return out_label, out_label_refined, out_score, bbox        
-        
+    
+    return out_label, out_label_refined, out_score, bbox
 
-def test_dataset(cfg,dataset, predictor, visualization=False, topk=False, confident_score=0.7, low_threshold=0.4):
+
+def test_dataset(cfg, dataset, predictor, visualization=False, topk=False, confident_score=0.7, low_threshold=0.4):
     metrics_all = []
     for i in trange(len(dataset)):
         metrics = test_sample(cfg, dataset[i], predictor, visualization=visualization,
                               topk=topk, confident_score=confident_score, low_threshold=low_threshold)
         metrics_all.append(metrics)
-
+    
     print('========================================================')
     if not topk:
         print("Mask threshold: ", confident_score)
     else:
         print(f"We first pick top {cfg.TEST.DETECTIONS_PER_IMAGE} instances ")
         print(f"and get those whose class confidence > {low_threshold}.")
-
+    
     print("weight: ", cfg.MODEL.WEIGHTS)
     result = {}
     num = len(metrics_all)
@@ -497,11 +601,11 @@ def test_dataset(cfg,dataset, predictor, visualization=False, topk=False, confid
     for metrics in metrics_all:
         for k in metrics.keys():
             result[k] = result.get(k, 0) + metrics[k]
-
+    
     for k in sorted(result.keys()):
         result[k] /= num
         print('%s: %f' % (k, result[k]))
-
+    
     print('%.6f' % (result['Objects Precision']))
     print('%.6f' % (result['Objects Recall']))
     print('%.6f' % (result['Objects F-measure']))
@@ -509,17 +613,21 @@ def test_dataset(cfg,dataset, predictor, visualization=False, topk=False, confid
     print('%.6f' % (result['Boundary Recall']))
     print('%.6f' % (result['Boundary F-measure']))
     print('%.6f' % (result['obj_detected_075_percentage']))
-
+    
     print('========================================================')
     print(result)
     print('====================END=================================')
 
-def test_dataset_crop(cfg,dataset, predictor, network_crop, visualization=False, topk=True, confident_score=0.9, low_threshold=0.4):
+
+def test_dataset_crop(cfg, dataset, predictor, network_crop, visualization=False, topk=True, confident_score=0.9,
+                      low_threshold=0.4):
     metrics_all = []
     metrics_all_refined = []
     for i in trange(len(dataset)):
-        metrics, metrics_refined = test_sample_crop(cfg, dataset[i], predictor, network_crop, visualization=visualization,
-                              topk=topk, confident_score=confident_score, low_threshold=low_threshold)
+        metrics, metrics_refined = test_sample_crop(cfg, dataset[i], predictor, network_crop,
+                                                    visualization=visualization,
+                                                    topk=topk, confident_score=confident_score,
+                                                    low_threshold=low_threshold)
         metrics_all.append(metrics)
         metrics_all_refined.append(metrics_refined)
     print('========================================================')
@@ -528,7 +636,7 @@ def test_dataset_crop(cfg,dataset, predictor, network_crop, visualization=False,
     else:
         print(f"We first pick top {cfg.TEST.DETECTIONS_PER_IMAGE} instances ")
         print(f"and get those whose class confidence > {low_threshold}.")
-
+    
     print("weight: ", cfg.MODEL.WEIGHTS)
     result = {}
     num = len(metrics_all)
@@ -537,11 +645,11 @@ def test_dataset_crop(cfg,dataset, predictor, network_crop, visualization=False,
     for metrics in metrics_all:
         for k in metrics.keys():
             result[k] = result.get(k, 0) + metrics[k]
-
+    
     for k in sorted(result.keys()):
         result[k] /= num
         print('%s: %f' % (k, result[k]))
-
+    
     print('%.6f' % (result['Objects Precision']))
     print('%.6f' % (result['Objects Recall']))
     print('%.6f' % (result['Objects F-measure']))
@@ -549,16 +657,16 @@ def test_dataset_crop(cfg,dataset, predictor, network_crop, visualization=False,
     print('%.6f' % (result['Boundary Recall']))
     print('%.6f' % (result['Boundary F-measure']))
     print('%.6f' % (result['obj_detected_075_percentage']))
-
+    
     print('========================================================')
     print(result)
     print('====================Refined=============================')
-
+    
     result_refined = {}
     for metrics in metrics_all_refined:
         for k in metrics.keys():
             result_refined[k] = result_refined.get(k, 0) + metrics[k]
-
+    
     for k in sorted(result_refined.keys()):
         result_refined[k] /= num
         print('%s: %f' % (k, result_refined[k]))

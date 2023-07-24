@@ -6,9 +6,6 @@ from typing import Optional
 import torch
 from torch import nn, Tensor
 from torch.nn import functional as F
-from torch.nn.parameter import Parameter
-from torch.nn.modules.linear import NonDynamicallyQuantizableLinear
-from torch.nn.init import constant_, xavier_normal_, xavier_uniform_
 
 from detectron2.config import configurable
 from detectron2.layers import Conv2d

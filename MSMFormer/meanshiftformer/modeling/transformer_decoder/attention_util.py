@@ -7,7 +7,6 @@ from torch.nn import functional as F
 from torch.nn.functional import pad
 from torch import _VF
 from torch.nn.parameter import Parameter
-from torch.nn.modules.linear import NonDynamicallyQuantizableLinear
 from torch.nn.init import constant_, xavier_normal_, xavier_uniform_
 
 from detectron2.config import configurable
